@@ -1,12 +1,15 @@
 #!/usr/bin/python3
 
 import telebot
+from telebot.types import InputFile
 import _thread
 import subprocess
 import time
 from datetime import timedelta
 import os
 import re
+
+script_dir = os.path.dirname(os.path.realpath(__file__))
 
 from bot_settings import *
 bot = telebot.TeleBot(bot_key)
@@ -25,8 +28,7 @@ def get_file_length(input_file):
     return None
   proc_stdout = proc.communicate()
   try:
-    str_length = re.search('(\d\d:){2}\d\d\.\d\d', str(proc_stdout)).group(0)
-    #length = re.search('(\d\d:){2}\d\d', str(proc_stdout)).group(0)
+    str_length = re.search('Duration: ((\d{2}:){2}\d{2}\.\d{2})', str(proc_stdout)).group(1)
   except:
     print("ffmpeg didn't return audio length")
     return None
@@ -52,14 +54,14 @@ def upload_payload(chat_id,input_file,cap):
     bot.send_message(chat_id, 'файл большой, разобьём на ' + str(fragments) + ' частей по ' + str(timedelta(seconds=round(fragment_length))))
     for f in range(0,fragments,1):
       bot.send_message(chat_id, 'конвертим фрагмент #' + str(f + 1))
-      fname_final = 'out' + input_file + '_part' + str(f + 1) + '.ogg'
+      fname_final = input_file + '_part' + str(f + 1) + '.ogg'
       rc = subprocess.call(['ffmpeg', '-i', input_file, '-ss', str(f * fragment_length), '-t', str(fragment_length), '-filter_complex', compand, '-c:a', 'libvorbis', '-b:a', '96k', '-ar', '44100', '-vn', fname_final])
       if rc != 0:
         bot.send_message(chat_id, "ffmpeg can't compress audio, exitcode = " + str(rc))
         return None
       bot.send_message(chat_id, 'удалось, заливаю его...')
-      cpt = cap + b' ' + str(f + 1).encode()
-      bot.send_document(chat_id, data=open(fname_final, "rb"), caption=cpt)
+      cpt = f"{cap} {str(f + 1)}"
+      bot.send_document(chat_id, document=InputFile(fname_final), caption=cpt)
       if os.path.exists(fname_final):
         os.remove(fname_final)
     if os.path.exists(input_file):
@@ -67,14 +69,14 @@ def upload_payload(chat_id,input_file,cap):
 
 
   else:
-    bot.send_message(chat_id, 'файл норм, льём целиком')
-    fname_final = 'out' + input_file + '.ogg'
+    bot.send_message(chat_id, 'файл норм, жмём целиком')
+    fname_final = input_file + '.ogg'
     rc = subprocess.call(['ffmpeg', '-i', input_file, '-filter_complex', compand, '-c:a', 'libvorbis', '-b:a', '96k', '-ar', '44100', '-vn', fname_final])
     if rc != 0:
       bot.send_message(chat_id, "ffmpeg can't compress audio, exitcode = " + str(rc))
       return None
     bot.send_message(chat_id, 'удалось, сейчас залью файл...')
-    bot.send_document(chat_id, data=open(fname_final, "rb"), caption=cap)
+    bot.send_document(chat_id, document=InputFile(fname_final), caption=cap)
     if os.path.exists(input_file):
       os.remove(input_file)
     if os.path.exists(fname_final):
@@ -84,21 +86,20 @@ def upload_payload(chat_id,input_file,cap):
 
 
 def download_video(chat_id, url):
-  fname_tmp = str(time.time()) + ".m4a"
+  fname_tmp = f"{script_dir}/{str(time.time())}"
 
   try:
-    video_title = subprocess.check_output(["youtube-dl", "--skip-download", "--get-title", "--no-warnings", url])
+    video_title = subprocess.check_output(["yt-dlp", "--skip-download", "--get-title", "--no-warnings", url]).decode("utf-8").rstrip('\n')
   except:
     bot.send_message(chat_id, "что-то не качается, можно попробовать позже")
     return None
 
-  bot.send_message(chat_id, "скачиваем с youtube...")
+  bot.send_message(chat_id, f"скачиваем {video_title} с youtube...")
 
-  #rc = subprocess.call(["youtube-dl", "--extract-audio", "--audio-format", "mp3", "--output", fname_tmp, str(url)])
-  rc = subprocess.call(["youtube-dl", "--extract-audio", "--output", fname_tmp, str(url)])
-  #remember: looks like youtube-dl makes not real mp3
-  if rc != 0:
-    bot.send_message(chat_id, "youtube-dl can't download audio, exitcode = " + str(rc))
+  try:
+    fname_tmp = subprocess.check_output(["yt-dlp", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "best", "--output", fname_tmp, str(url)],stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
+  except:
+    bot.send_message(chat_id, f"yt-dlp can't download audio with error {fname_tmp}")
     return None
 
   bot.send_message(chat_id, "удалось, теперь компрессим звук...")
@@ -132,7 +133,7 @@ def compress_audio(chat_id, file_id_info, audio_title):
 
   bot.send_message(chat_id, "удалось, сейчас залью файл...")
 
-  bot.send_document(chat_id, data=open(fname_final, "rb"), caption=audio_title)
+  bot.send_document(chat_id, document=InputFile(fname_final), caption=audio_title)
 
   if os.path.exists(fname_tmp):
     os.remove(fname_tmp)
@@ -184,6 +185,5 @@ def process_location(message):
   bot.send_message(message.chat.id, str(message))
 
 
-#l = get_file_length(None,'out.mp3')
-#print(l)
+
 bot.polling()
