@@ -86,8 +86,8 @@ def upload_payload(chat_id,input_file,cap):
 
 
 def download_video(chat_id, url):
-  fname_tmp = f"{script_dir}/{str(time.time())}"
-
+  fname_tmp = f"{script_dir}/{str(time.time())}.opus"
+  print("output filename = {fname_tmp}")
   try:
     video_title = subprocess.check_output(["yt-dlp", "--skip-download", "--get-title", "--no-warnings", url]).decode("utf-8").rstrip('\n')
   except:
@@ -97,7 +97,7 @@ def download_video(chat_id, url):
   bot.send_message(chat_id, f"скачиваем {video_title} с youtube...")
 
   try:
-    fname_tmp = subprocess.check_output(["yt-dlp", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "best", "--output", fname_tmp, str(url)],stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
+    fname_tmp = subprocess.check_output(["yt-dlp", "--no-warnings", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)],stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
   except:
     bot.send_message(chat_id, f"yt-dlp can't download audio with error {fname_tmp}")
     return None
