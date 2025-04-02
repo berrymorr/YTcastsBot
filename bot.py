@@ -89,9 +89,10 @@ def download_video(chat_id, url):
   fname_tmp = f"{script_dir}/{str(time.time())}.opus"
   print("output filename = {fname_tmp}")
   try:
-    video_title = subprocess.check_output(["yt-dlp", "--cookies", "cookies.txt", "--skip-download", "--get-title", "--no-warnings", url]).decode("utf-8").rstrip('\n')
-  except:
-    bot.send_message(chat_id, "что-то не качается, можно попробовать позже")
+    video_title = subprocess.check_output(["yt-dlp", "--cookies", "cookies.txt", "--skip-download", "--get-title", "--no-warnings", url],stderr=subprocess.STDOUT).decode("utf-8").rstrip('\n')
+  except subprocess.CalledProcessError as e:
+    err_msg = e.output.decode("utf-8").rstrip('\n')
+    bot.send_message(chat_id, f"что-то не качается, можно попробовать позже:\n{err_msg}")
     return None
 
   bot.send_message(chat_id, f"скачиваем {video_title} с youtube...")
