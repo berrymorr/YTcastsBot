@@ -89,7 +89,7 @@ def download_video(chat_id, url):
   fname_tmp = f"{script_dir}/{str(time.time())}.opus"
   print("output filename = {fname_tmp}")
   try:
-    video_title = subprocess.check_output(["yt-dlp", "--cookies", "cookies.txt", "--skip-download", "--get-title", "--no-warnings", url],stderr=subprocess.STDOUT).decode("utf-8").rstrip('\n')
+    video_title = subprocess.check_output(["yt-dlp", "--skip-download", "--get-title", "--no-warnings", url],stderr=subprocess.STDOUT).decode("utf-8").rstrip('\n')
   except subprocess.CalledProcessError as e:
     err_msg = e.output.decode("utf-8").rstrip('\n')
     bot.send_message(chat_id, f"что-то не качается, можно попробовать позже:\n{err_msg}")
@@ -98,7 +98,7 @@ def download_video(chat_id, url):
   bot.send_message(chat_id, f"скачиваем {video_title} с youtube...")
 
   try:
-    fname_tmp = subprocess.check_output(["yt-dlp", "--cookies", "cookies.txt", "--no-warnings", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)],stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
+    fname_tmp = subprocess.check_output(["yt-dlp", "--no-warnings", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)],stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
   except:
     bot.send_message(chat_id, f"yt-dlp can't download audio with error {fname_tmp}")
     return None
