@@ -39,7 +39,8 @@ def get_file_length(input_file):
 
 def upload_payload(chat_id,input_file,cap):
   fsize = os.path.getsize(input_file)
-  _50MB = 52428800
+#  _50MB = 52428800
+  _50MB = 42428800
   fragments = ( fsize // _50MB ) + 1
 
   if fragments > 1:
@@ -98,7 +99,7 @@ def download_video(chat_id, url):
   bot.send_message(chat_id, f"скачиваем {video_title} с youtube...")
 
   try:
-    fname_tmp = subprocess.check_output(["yt-dlp", "--cookies", "cookies.txt", "--no-warnings", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)],stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
+    fname_tmp = subprocess.check_output(["yt-dlp", "--no-warnings", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)],stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
   except:
     bot.send_message(chat_id, f"yt-dlp can't download audio with error {fname_tmp}")
     return None
@@ -187,4 +188,6 @@ def process_location(message):
 
 
 
-bot.polling()
+#bot.polling()
+bot.infinity_polling(skip_pending=True)
+
