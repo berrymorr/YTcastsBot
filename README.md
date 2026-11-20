@@ -12,3 +12,5 @@ COMPAND=compand=attacks=0:points=-60/-900|-45/-20|-27/-6|0/0|9/0:gain=9
 ```
 
 2. run ./deploy.sh
+
+the running bot is deployed by a GitLab pipeline on every push to master: it builds the image like deploy.sh and passes the same three settings to the container
