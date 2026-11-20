@@ -8,10 +8,18 @@ import time
 from datetime import timedelta
 import os
 import re
+import sys
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
-from bot_settings import *
+# settings come from the environment, see README.md
+missing = [name for name in ['BOT_KEY', 'ALLOWED_IDS', 'COMPAND'] if not os.environ.get(name)]
+if missing:
+  sys.exit('not set in the environment: ' + ', '.join(missing))
+bot_key = os.environ['BOT_KEY']
+allowed_ids = [int(i) for i in re.split(r'[\s,]+', os.environ['ALLOWED_IDS'].strip())]
+compand = os.environ['COMPAND']
+
 bot = telebot.TeleBot(bot_key)
 
 
