@@ -5,6 +5,7 @@ from telebot.types import InputFile
 import _thread
 import subprocess
 import time
+import traceback
 from datetime import timedelta
 import os
 import re
@@ -21,6 +22,52 @@ allowed_ids = [int(i) for i in re.split(r'[\s,]+', os.environ['ALLOWED_IDS'].str
 compand = os.environ['COMPAND']
 
 bot = telebot.TeleBot(bot_key)
+
+
+# a line to the log, which is the container's: the time in UTC, then the
+# request it is about - a video id, or "audio" and the message's id
+def log(tag, msg):
+  stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+  sys.stdout.write(''.join(f"{stamp} [{tag}] {line}\n" for line in str(msg).splitlines() or ['']))
+  sys.stdout.flush()
+
+
+# who sent a message, for the log
+def who(message):
+  return f"{message.from_user.id} @{message.from_user.username}"
+
+
+def size_mb(path):
+  return f"{os.path.getsize(path) / 1048576:.1f} MB"
+
+
+# runs a request in a thread of its own; what breaks it goes to the log
+def start_request(tag, request, *args):
+  def run():
+    started = time.time()
+    try:
+      request(*args)
+    except Exception:
+      log(tag, "broke: " + traceback.format_exc())
+    log(tag, f"over in {time.time() - started:.0f} s")
+  _thread.start_new_thread(run, ())
+
+
+# runs a program and puts into the log what it said on stderr (the last 20
+# lines) and how it ended; returns the finished process
+def run_logged(tag, args):
+  started = time.time()
+  p = subprocess.run(args, capture_output=True)
+  for line in p.stderr.decode("utf-8", "replace").splitlines()[-20:]:
+    log(tag, f"{args[0]}: {line}")
+  ended = "done" if p.returncode == 0 else f"failed, exit code {p.returncode}"
+  log(tag, f"{args[0]} {ended} in {time.time() - started:.0f} s")
+  return p
+
+
+# ffmpeg, saying nothing but its errors; returns its exit code
+def ffmpeg(tag, args):
+  return run_logged(tag, ["ffmpeg", "-hide_banner", "-loglevel", "error"] + args).returncode
 
 
 
@@ -45,7 +92,7 @@ def get_file_length(input_file):
     return length
 
 
-def upload_payload(chat_id,input_file,cap):
+def upload_payload(chat_id,input_file,cap,tag):
   fsize = os.path.getsize(input_file)
 #  _50MB = 52428800
   _50MB = 42428800
@@ -59,18 +106,20 @@ def upload_payload(chat_id,input_file,cap):
       return None
 
     fragment_length = total_length / fragments
+    log(tag, f"{fragments} parts of {timedelta(seconds=round(fragment_length))}")
 
     bot.send_message(chat_id, 'файл большой, разобьём на ' + str(fragments) + ' частей по ' + str(timedelta(seconds=round(fragment_length))))
     for f in range(0,fragments,1):
       bot.send_message(chat_id, 'конвертим фрагмент #' + str(f + 1))
       fname_final = input_file + '_part' + str(f + 1) + '.ogg'
-      rc = subprocess.call(['ffmpeg', '-i', input_file, '-ss', str(f * fragment_length), '-t', str(fragment_length), '-filter_complex', compand, '-c:a', 'libvorbis', '-b:a', '96k', '-ar', '44100', '-vn', fname_final])
+      rc = ffmpeg(tag, ['-i', input_file, '-ss', str(f * fragment_length), '-t', str(fragment_length), '-filter_complex', compand, '-c:a', 'libvorbis', '-b:a', '96k', '-ar', '44100', '-vn', fname_final])
       if rc != 0:
         bot.send_message(chat_id, "ffmpeg can't compress audio, exitcode = " + str(rc))
         return None
       bot.send_message(chat_id, 'удалось, заливаю его...')
       cpt = f"{cap} {str(f + 1)}"
       bot.send_document(chat_id, document=InputFile(fname_final), caption=cpt)
+      log(tag, f"sent part {f + 1} of {fragments}, {size_mb(fname_final)}")
       if os.path.exists(fname_final):
         os.remove(fname_final)
     if os.path.exists(input_file):
@@ -80,12 +129,13 @@ def upload_payload(chat_id,input_file,cap):
   else:
     bot.send_message(chat_id, 'файл норм, жмём целиком')
     fname_final = input_file + '.ogg'
-    rc = subprocess.call(['ffmpeg', '-i', input_file, '-filter_complex', compand, '-c:a', 'libvorbis', '-b:a', '96k', '-ar', '44100', '-vn', fname_final])
+    rc = ffmpeg(tag, ['-i', input_file, '-filter_complex', compand, '-c:a', 'libvorbis', '-b:a', '96k', '-ar', '44100', '-vn', fname_final])
     if rc != 0:
       bot.send_message(chat_id, "ffmpeg can't compress audio, exitcode = " + str(rc))
       return None
     bot.send_message(chat_id, 'удалось, сейчас залью файл...')
     bot.send_document(chat_id, document=InputFile(fname_final), caption=cap)
+    log(tag, f"sent, {size_mb(fname_final)}")
     if os.path.exists(input_file):
       os.remove(input_file)
     if os.path.exists(fname_final):
@@ -94,43 +144,74 @@ def upload_payload(chat_id,input_file,cap):
 
 
 
+# whether cookies.txt holds a YouTube login: yt-dlp counts one only while
+# LOGIN_INFO is in it, and YouTube takes that out when it ends the session
+def has_login():
+  try:
+    with open("cookies.txt") as f:
+      return any(line.split("\t")[5:6] == ["LOGIN_INFO"] for line in f)
+  except OSError:
+    return False
+
+
+# yt-dlp's output; a failure raises CalledProcessError
+def run_yt_dlp(tag, args):
+  p = run_logged(tag, ["yt-dlp"] + args)
+  p.check_returncode()
+  return p.stdout.decode("utf-8").rstrip("\n")
+
+
+# the ERROR lines of a failed yt-dlp, or all it said if it said none
+def yt_dlp_errors(e):
+  lines = e.stderr.decode("utf-8", "replace").splitlines()
+  return "\n".join([line for line in lines if line.startswith("ERROR")] or lines)
+
+
 # runs yt-dlp with the YouTube cookies in cookies.txt, and once more without
-# them if that fails: stale cookies can fail where none at all would work
-def yt_dlp(chat_id, args):
+# them if that fails: stale cookies can fail where none at all would work.
+# The log says whether the cookies held a login, and when YouTube took it
+# out: nothing fails for that, yt-dlp just goes on as with no login.
+def yt_dlp(chat_id, tag, step, args):
+  login = has_login()
+  log(tag, f"{step}: yt-dlp with cookies.txt, " + ("logged in to YouTube" if login else "no YouTube login in it"))
   try:
-    return subprocess.check_output(["yt-dlp", "--cookies", "cookies.txt"] + args, stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
-  except subprocess.CalledProcessError as e:
-    print("yt-dlp failed with cookies.txt:\n" + e.output.decode("utf-8").rstrip("\n"), flush=True)
+    out = run_yt_dlp(tag, ["--cookies", "cookies.txt"] + args)
+  except subprocess.CalledProcessError:
+    out = None
+  if login and not has_login():
+    log(tag, "YouTube took the login out of cookies.txt: the session is over, new cookies are needed")
+  if out is not None:
+    return out
   bot.send_message(chat_id, "с куками не вышло, пробуем без них...")
-  return subprocess.check_output(["yt-dlp"] + args, stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
+  log(tag, f"{step}: yt-dlp once more, without cookies")
+  return run_yt_dlp(tag, args)
 
 
-def download_video(chat_id, url):
+def download_video(chat_id, url, tag):
   fname_tmp = f"{script_dir}/{str(time.time())}.opus"
-  print("output filename = {fname_tmp}")
   try:
-    video_title = yt_dlp(chat_id, ["--skip-download", "--get-title", "--no-warnings", url])
+    video_title = yt_dlp(chat_id, tag, "title", ["--skip-download", "--get-title", url])
   except subprocess.CalledProcessError as e:
-    err_msg = e.output.decode("utf-8").rstrip('\n')
-    bot.send_message(chat_id, f"что-то не качается, можно попробовать позже:\n{err_msg}")
+    bot.send_message(chat_id, f"что-то не качается, можно попробовать позже:\n{yt_dlp_errors(e)}")
     return None
+  log(tag, f"title: {video_title}")
 
   bot.send_message(chat_id, f"скачиваем {video_title} с youtube...")
 
   try:
-    fname_tmp = yt_dlp(chat_id, ["--no-warnings", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)])
+    fname_tmp = yt_dlp(chat_id, tag, "download", ["--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)])
   except subprocess.CalledProcessError as e:
-    err_msg = e.output.decode("utf-8").rstrip('\n')
-    bot.send_message(chat_id, f"yt-dlp can't download audio:\n{err_msg}")
+    bot.send_message(chat_id, f"yt-dlp can't download audio:\n{yt_dlp_errors(e)}")
     return None
+  log(tag, f"download: {fname_tmp}, {size_mb(fname_tmp)}")
 
   bot.send_message(chat_id, "удалось, теперь компрессим звук...")
   #here we must compress and upload
-  upload_payload(chat_id,fname_tmp,video_title)
+  upload_payload(chat_id,fname_tmp,video_title,tag)
 
 
 
-def compress_audio(chat_id, file_id_info, audio_title):
+def compress_audio(chat_id, file_id_info, audio_title, tag):
   fname_tmp = str(time.time()) + ".mp3"
   fname_final = "out" + str(time.time()) + ".ogg"
 
@@ -144,10 +225,11 @@ def compress_audio(chat_id, file_id_info, audio_title):
   except:
     bot.send_message(chat_id, "случилась какая-то херня, и я не смог сохранить файл...")
     return None
+  log(tag, f"received {fname_tmp}, {size_mb(fname_tmp)}")
 
   bot.send_message(chat_id, "удалось, теперь компрессим звук...")
 
-  rc = subprocess.call(["ffmpeg", "-i", fname_tmp, "-filter_complex", compand, "-c:a", "libvorbis", "-b:a", "96k", "-ar", "44100", "-vn", fname_final])
+  rc = ffmpeg(tag, ["-i", fname_tmp, "-filter_complex", compand, "-c:a", "libvorbis", "-b:a", "96k", "-ar", "44100", "-vn", fname_final])
 
   if rc != 0:
     bot.send_message(chat_id, "ffmpeg can't compress audio, exitcode = " + str(rc))
@@ -156,6 +238,7 @@ def compress_audio(chat_id, file_id_info, audio_title):
   bot.send_message(chat_id, "удалось, сейчас залью файл...")
 
   bot.send_document(chat_id, document=InputFile(fname_final), caption=audio_title)
+  log(tag, f"sent, {size_mb(fname_final)}")
 
   if os.path.exists(fname_tmp):
     os.remove(fname_tmp)
@@ -176,29 +259,36 @@ def process_text(message):
       res = re.search(r'(?:youtube\.com\/\S*(?:(?:\/e(?:mbed))?\/|watch\?(?:\S*?&?v\=))|youtu\.be\/)([a-zA-Z0-9_-]{6,11})', message.text)
       video_name = res.group(1)
     except:
+      log("bot", f"{who(message)}, not a YouTube link: {message.text[:200]!r}")
       bot.send_message(message.chat.id, 'дай мне ссылку на видос на ютубе, или кинь файл <20МБ')
       return
 
     url = "https://www.youtube.com/watch?v=" + video_name
+    log(video_name, f"{who(message)} asks for {message.text[:200]}")
     bot.send_message(message.chat.id, 'пробуем скачать, video id=' + video_name)
-    _thread.start_new_thread(download_video, (message.chat.id, message.text))
+    start_request(video_name, download_video, message.chat.id, message.text, video_name)
 
   else:
+    log("bot", f"{who(message)}, not on the list: {message.text[:200]!r}")
     bot.send_message(message.chat.id, 'вас нет в VIP-списке, обратитесь к @berrymorr , приложив свой id: ' + str(message.from_user.id))
 
 
 @bot.message_handler(content_types=['audio'])
 def process_file(message):
+  tag = f"audio {message.message_id}"
   if message.from_user.id in allowed_ids:
+    log(tag, f"{who(message)} sends {message.audio.title!r}, {message.audio.file_size / 1048576:.1f} MB")
     if message.audio.file_size/1024/1024 > 19.9:
+      log(tag, "over 19.9 MB, more than a bot may fetch")
       bot.send_message(message.chat.id, 'Паша Дуров мудак, курит табак, и ботам нельзя принимать файлы >20 Мб  https://core.telegram.org/bots/api#getfile')
       return
 
     file_id_info = bot.get_file(message.audio.file_id)
     bot.send_message(message.chat.id, 'пробуем скачать  ' + str(message.audio.title))
-    _thread.start_new_thread(compress_audio, (message.chat.id, file_id_info, message.audio.title))
+    start_request(tag, compress_audio, message.chat.id, file_id_info, message.audio.title, tag)
 
   else:
+    log(tag, f"{who(message)}, not on the list")
     bot.send_message(message.chat.id, 'вас нет в VIP-списке, обратитесь к @berrymorr , приложив свой id: ' + str(message.from_user.id))
 
 
@@ -209,6 +299,8 @@ def process_location(message):
 
 
 #bot.polling()
+log("bot", "yt-dlp " + subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True).stdout.strip())
+log("bot", "cookies.txt: " + ("logged in to YouTube" if has_login() else "no YouTube login in it" if os.path.exists("cookies.txt") else "none"))
 print(f"polling as @{bot.get_me().username}", flush=True)
 bot.infinity_polling(skip_pending=True)
 
