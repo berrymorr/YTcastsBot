@@ -197,5 +197,6 @@ def process_location(message):
 
 
 #bot.polling()
+print(f"polling as @{bot.get_me().username}", flush=True)
 bot.infinity_polling(skip_pending=True)
 
