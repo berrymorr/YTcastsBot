@@ -119,8 +119,9 @@ def download_video(chat_id, url):
 
   try:
     fname_tmp = yt_dlp(chat_id, ["--no-warnings", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)])
-  except:
-    bot.send_message(chat_id, f"yt-dlp can't download audio with error {fname_tmp}")
+  except subprocess.CalledProcessError as e:
+    err_msg = e.output.decode("utf-8").rstrip('\n')
+    bot.send_message(chat_id, f"yt-dlp can't download audio:\n{err_msg}")
     return None
 
   bot.send_message(chat_id, "удалось, теперь компрессим звук...")
