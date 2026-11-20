@@ -94,11 +94,22 @@ def upload_payload(chat_id,input_file,cap):
 
 
 
+# runs yt-dlp with the YouTube cookies in cookies.txt, and once more without
+# them if that fails: stale cookies can fail where none at all would work
+def yt_dlp(chat_id, args):
+  try:
+    return subprocess.check_output(["yt-dlp", "--cookies", "cookies.txt"] + args, stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
+  except subprocess.CalledProcessError as e:
+    print("yt-dlp failed with cookies.txt:\n" + e.output.decode("utf-8").rstrip("\n"), flush=True)
+  bot.send_message(chat_id, "с куками не вышло, пробуем без них...")
+  return subprocess.check_output(["yt-dlp"] + args, stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
+
+
 def download_video(chat_id, url):
   fname_tmp = f"{script_dir}/{str(time.time())}.opus"
   print("output filename = {fname_tmp}")
   try:
-    video_title = subprocess.check_output(["yt-dlp", "--cookies", "cookies.txt", "--skip-download", "--get-title", "--no-warnings", url],stderr=subprocess.STDOUT).decode("utf-8").rstrip('\n')
+    video_title = yt_dlp(chat_id, ["--skip-download", "--get-title", "--no-warnings", url])
   except subprocess.CalledProcessError as e:
     err_msg = e.output.decode("utf-8").rstrip('\n')
     bot.send_message(chat_id, f"что-то не качается, можно попробовать позже:\n{err_msg}")
@@ -107,7 +118,7 @@ def download_video(chat_id, url):
   bot.send_message(chat_id, f"скачиваем {video_title} с youtube...")
 
   try:
-    fname_tmp = subprocess.check_output(["yt-dlp", "--no-warnings", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)],stderr=subprocess.STDOUT).decode("utf-8").rstrip("\n")
+    fname_tmp = yt_dlp(chat_id, ["--no-warnings", "--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)])
   except:
     bot.send_message(chat_id, f"yt-dlp can't download audio with error {fname_tmp}")
     return None
