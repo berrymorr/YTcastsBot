@@ -1,5 +1,7 @@
 # YTcastsBot
 
+A Telegram bot: send it a YouTube link or an audio file. It tells a podcast or a lecture from music by the sound itself (YAMNet, `classify.py`): a podcast comes back compressed (COMPAND) in pieces of 30 minutes, music comes back as it was, neither compressed nor cut. A word in the message, «музыка» or «подкаст», overrides its guess.
+
 1. don't forget to create such .env beside deploy.sh, the bot reads its settings from the environment:
 
 ```

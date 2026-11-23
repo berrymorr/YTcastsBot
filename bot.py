@@ -5,6 +5,8 @@ from telebot import apihelper
 from telebot.types import InputFile
 import requests
 import _thread
+import json
+import math
 import subprocess
 import time
 import traceback
@@ -12,6 +14,8 @@ from datetime import timedelta
 import os
 import re
 import sys
+
+import classify
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
@@ -99,76 +103,100 @@ def ffmpeg(tag, args):
 
 
 
-def get_file_length(input_file):
-  def get_sec(time_str):
-    [h, m, s] = time_str.split(':')
-    return int(h) * 3600 + int(m) * 60 + float(s)
+# a podcast's pieces: 30 minutes each, so that piece n starts at (n - 1) * 30
+PART = 30 * 60
 
+
+# the file's length in seconds, or None if ffprobe cannot tell
+def duration_of(path):
+  p = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', path], capture_output=True, text=True)
   try:
-    proc = subprocess.Popen(['ffmpeg', '-i', input_file], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-  except:
-    print("can't run ffmpeg to get audio length")
+    return float(p.stdout.strip())
+  except ValueError:
     return None
-  proc_stdout = proc.communicate()
+
+
+# what the sender calls it, if anything: a word outside the link overrides
+# the bot's own guess
+def kind_named(text):
+  words = set(re.findall(r'\w+', re.sub(r'\S*(?:://|youtu)\S*', ' ', text or '').lower()))
+  if words & {'музыка', 'музыку', 'music'}:
+    return 'music'
+  if words & {'подкаст', 'podcast', 'лекция', 'лекцию', 'lecture'}:
+    return 'podcast'
+  return None
+
+
+# podcast (a lecture is one too) or music, and why. By the sound itself
+# (classify.py): over 65% of its frames speech is a podcast, under 35%
+# music; in between, YouTube's category says, Music or not. YouTube's
+# category alone is often wrong: an interview filed under Music, a live
+# song under Comedy.
+def kind_of(tag, path, duration, named, category=None):
+  if named:
+    return named, "так сказано в сообщении"
   try:
-    str_length = re.search('Duration: ((\d{2}:){2}\d{2}\.\d{2})', str(proc_stdout)).group(1)
-  except:
-    print("ffmpeg didn't return audio length")
-    return None
-  else:
-    length = get_sec(str_length)
-    return length
+    speech, music = classify.speech_and_music(path, duration or 60)
+  except Exception:
+    log(tag, "sound: could not tell: " + traceback.format_exc())
+    return 'podcast', "звук не разобрал"
+  share = speech / max(speech + music, 1)
+  log(tag, f"sound: {speech} frames of speech, {music} of music; YouTube's category: {category}")
+  if share >= 0.65:
+    return 'podcast', f"речи {share:.0%}"
+  if share <= 0.35:
+    return 'music', f"музыки {1 - share:.0%}"
+  if category == 'Music':
+    return 'music', f"речи {share:.0%}, а YouTube говорит Music"
+  return 'podcast', f"речи {share:.0%}"
 
 
-def upload_payload(chat_id,input_file,cap,tag):
-  fsize = os.path.getsize(input_file)
-#  _50MB = 52428800
-  _50MB = 42428800
-  fragments = ( fsize // _50MB ) + 1
-
-  if fragments > 1:
+# a podcast: compressed (COMPAND, Vorbis 96k) and sent in pieces of PART; the
+# last piece runs to the end, and an end of under 2 minutes goes with the
+# piece before rather than alone
+def send_podcast(chat_id, path, title, duration, tag):
+  parts = max(1, math.ceil(((duration or 0) - 120) / PART))
+  log(tag, f"podcast: {parts} part(s) of 30 minutes")
+  if parts == 1:
+    bot.send_message(chat_id, 'жмём целиком...')
+  for n in range(parts):
+    out = f"{path}_part{n + 1}.ogg"
+    seek = ['-ss', str(n * PART)] if n else []
+    length = ['-t', str(PART)] if n < parts - 1 else []
+    if parts > 1:
+      bot.send_message(chat_id, f'жму часть {n + 1} из {parts}...')
     try:
-      total_length = get_file_length(input_file)
-    except:
-      bot.send_message(chat_id, "can't get file length")
-      return None
-
-    fragment_length = total_length / fragments
-    log(tag, f"{fragments} parts of {timedelta(seconds=round(fragment_length))}")
-
-    bot.send_message(chat_id, 'файл большой, разобьём на ' + str(fragments) + ' частей по ' + str(timedelta(seconds=round(fragment_length))))
-    for f in range(0,fragments,1):
-      bot.send_message(chat_id, 'конвертим фрагмент #' + str(f + 1))
-      fname_final = input_file + '_part' + str(f + 1) + '.ogg'
-      rc = ffmpeg(tag, ['-i', input_file, '-ss', str(f * fragment_length), '-t', str(fragment_length), '-filter_complex', compand, '-c:a', 'libvorbis', '-b:a', '96k', '-ar', '44100', '-vn', fname_final])
+      rc = ffmpeg(tag, seek + ['-i', path] + length + ['-filter_complex', compand, '-c:a', 'libvorbis', '-b:a', '96k', '-ar', '44100', '-vn', out])
       if rc != 0:
         bot.send_message(chat_id, "ffmpeg can't compress audio, exitcode = " + str(rc))
-        return None
-      bot.send_message(chat_id, 'удалось, заливаю его...')
-      cpt = f"{cap} {str(f + 1)}"
-      bot.send_document(chat_id, document=InputFile(fname_final), caption=cpt)
-      log(tag, f"sent part {f + 1} of {fragments}, {size_mb(fname_final)}")
-      if os.path.exists(fname_final):
-        os.remove(fname_final)
-    if os.path.exists(input_file):
-      os.remove(input_file)
+        return
+      cap = title
+      if parts > 1:
+        end = timedelta(seconds=round(duration)) if n == parts - 1 else timedelta(seconds=(n + 1) * PART)
+        cap = f"{title} {n + 1}/{parts}, {timedelta(seconds=n * PART)}–{end}"
+      bot.send_document(chat_id, document=InputFile(out), caption=cap, timeout=3600)
+      log(tag, f"sent part {n + 1} of {parts}, {size_mb(out)}")
+    finally:
+      if os.path.exists(out):
+        os.remove(out)
 
 
+# music: sent as it came, neither compressed nor cut. Telegram's player
+# takes m4a and mp3 (sendAudio); anything else goes as a file.
+def send_music(chat_id, path, title, performer, duration, tag):
+  if os.path.getsize(path) > max_send_mb * 1048576:
+    log(tag, f"music: {size_mb(path)}, over the {max_send_mb} MB a bot may send")
+    bot.send_message(chat_id, f"файл {size_mb(path)}, а боту можно слать до {max_send_mb} МБ")
+    return
+  bot.send_message(chat_id, 'заливаю как есть...')
+  if path.endswith(('.m4a', '.mp3')):
+    bot.send_audio(chat_id, InputFile(path), title=title, performer=performer, duration=round(duration) if duration else None, timeout=3600)
   else:
-    bot.send_message(chat_id, 'файл норм, жмём целиком')
-    fname_final = input_file + '.ogg'
-    rc = ffmpeg(tag, ['-i', input_file, '-filter_complex', compand, '-c:a', 'libvorbis', '-b:a', '96k', '-ar', '44100', '-vn', fname_final])
-    if rc != 0:
-      bot.send_message(chat_id, "ffmpeg can't compress audio, exitcode = " + str(rc))
-      return None
-    bot.send_message(chat_id, 'удалось, сейчас залью файл...')
-    bot.send_document(chat_id, document=InputFile(fname_final), caption=cap)
-    log(tag, f"sent, {size_mb(fname_final)}")
-    if os.path.exists(input_file):
-      os.remove(input_file)
-    if os.path.exists(fname_final):
-      os.remove(fname_final)
+    bot.send_document(chat_id, document=InputFile(path), caption=title, timeout=3600)
+  log(tag, f"music: sent as it came, {size_mb(path)}")
 
+
+HINT = "(не так — пришли ещё раз со словом «музыка» или «подкаст»)"
 
 
 
@@ -215,33 +243,46 @@ def yt_dlp(chat_id, tag, step, args):
   return run_yt_dlp(tag, args)
 
 
-def download_video(chat_id, url, tag):
-  fname_tmp = f"{script_dir}/{str(time.time())}.opus"
+def download_video(chat_id, url, tag, named):
   try:
-    video_title = yt_dlp(chat_id, tag, "title", ["--skip-download", "--get-title", url])
+    meta = json.loads(yt_dlp(chat_id, tag, "title", ["--skip-download", "--print", "%(.{title,channel,artist,track,categories,duration})j", url]))
   except subprocess.CalledProcessError as e:
     bot.send_message(chat_id, f"что-то не качается, можно попробовать позже:\n{yt_dlp_errors(e)}")
     return None
+  video_title = meta.get('title') or tag
+  category = (meta.get('categories') or [None])[0]
   log(tag, f"title: {video_title}")
 
   bot.send_message(chat_id, f"скачиваем {video_title} с youtube...")
 
+  # the audio as YouTube has it, m4a when there is one: music goes out as it
+  # came, and Telegram's player takes m4a
   try:
-    fname_tmp = yt_dlp(chat_id, tag, "download", ["--ignore-config", "--print", "after_move:filepath", "--extract-audio", "--audio-format", "opus", "--output", f"{fname_tmp}", str(url)])
+    fname_tmp = yt_dlp(chat_id, tag, "download", ["--ignore-config", "-f", "bestaudio[ext=m4a]/bestaudio", "--print", "after_move:filepath", "--output", f"{script_dir}/{time.time()}.%(ext)s", str(url)])
   except subprocess.CalledProcessError as e:
     bot.send_message(chat_id, f"yt-dlp can't download audio:\n{yt_dlp_errors(e)}")
     return None
-  log(tag, f"download: {fname_tmp}, {size_mb(fname_tmp)}")
+  try:
+    duration = duration_of(fname_tmp) or meta.get('duration')
+    log(tag, f"download: {fname_tmp}, {size_mb(fname_tmp)}, {timedelta(seconds=round(duration or 0))}")
+    kind, why = kind_of(tag, fname_tmp, duration, named, category)
+    log(tag, f"kind: {kind} ({why})")
+    if kind == 'music':
+      bot.send_message(chat_id, f"похоже на музыку ({why}), шлю без обработки" + ("" if named else " " + HINT))
+      send_music(chat_id, fname_tmp, meta.get('track') or video_title, meta.get('artist') or meta.get('channel'), duration, tag)
+    else:
+      bot.send_message(chat_id, f"похоже на подкаст ({why}), компрессим" + ("" if named else " " + HINT))
+      send_podcast(chat_id, fname_tmp, video_title, duration, tag)
+  finally:
+    if os.path.exists(fname_tmp):
+      os.remove(fname_tmp)
 
-  bot.send_message(chat_id, "удалось, теперь компрессим звук...")
-  #here we must compress and upload
-  upload_payload(chat_id,fname_tmp,video_title,tag)
 
 
-
-def compress_audio(chat_id, file_id, audio_title, tag):
-  fname_tmp = str(time.time()) + ".mp3"
-  fname_final = "out" + str(time.time()) + ".ogg"
+# a file sent to the bot: a podcast is compressed and cut like one from
+# YouTube; music is already the sender's, so it gets only a word back
+def take_audio(chat_id, file_id, audio_title, tag, named):
+  fname_tmp = f"{script_dir}/{time.time()}.audio"
 
   bot.send_message(chat_id, "забираю файл...")
 
@@ -251,31 +292,25 @@ def compress_audio(chat_id, file_id, audio_title, tag):
     log(tag, f"fetching the file failed: {e}")
     bot.send_message(chat_id, "случилась какая-то херня, и я не смог сохранить файл...")
     return None
-  log(tag, f"received {fname_tmp}, {size_mb(fname_tmp)}")
-
-  bot.send_message(chat_id, "удалось, теперь компрессим звук...")
-
-  rc = ffmpeg(tag, ["-i", fname_tmp, "-filter_complex", compand, "-c:a", "libvorbis", "-b:a", "96k", "-ar", "44100", "-vn", fname_final])
-
-  if rc != 0:
-    bot.send_message(chat_id, "ffmpeg can't compress audio, exitcode = " + str(rc))
-    return None
-
-  bot.send_message(chat_id, "удалось, сейчас залью файл...")
-
-  bot.send_document(chat_id, document=InputFile(fname_final), caption=audio_title)
-  log(tag, f"sent, {size_mb(fname_final)}")
-
-  if os.path.exists(fname_tmp):
-    os.remove(fname_tmp)
-  if os.path.exists(fname_final):
-    os.remove(fname_final)
+  try:
+    duration = duration_of(fname_tmp)
+    log(tag, f"received {fname_tmp}, {size_mb(fname_tmp)}, {timedelta(seconds=round(duration or 0))}")
+    kind, why = kind_of(tag, fname_tmp, duration, named)
+    log(tag, f"kind: {kind} ({why})")
+    if kind == 'music':
+      bot.send_message(chat_id, f"похоже на музыку ({why}): обрабатывать нечего. Если это подкаст, пришли его с подписью «подкаст»")
+      return None
+    bot.send_message(chat_id, f"похоже на подкаст ({why}), компрессим" + ("" if named else " " + HINT))
+    send_podcast(chat_id, fname_tmp, audio_title, duration, tag)
+  finally:
+    if os.path.exists(fname_tmp):
+      os.remove(fname_tmp)
 
 
 
 @bot.message_handler(commands=['start'])
 def start_message(message):
-  bot.send_message(message.chat.id, 'Дратути, я люблю кочять и пожимать! Скинь мне либо ссылку на ютуб, либо аудиофайл, и я верну аудио с компрессией')
+  bot.send_message(message.chat.id, 'Дратути, я люблю кочять и пожимать! Скинь мне либо ссылку на ютуб, либо аудиофайл, и я верну аудио с компрессией. Подкасты и лекции жму и режу по 30 минут, музыку шлю как есть; если я не угадал, добавь к ссылке слово «музыка» или «подкаст»')
 
 
 @bot.message_handler(content_types=['text'])
@@ -286,13 +321,13 @@ def process_text(message):
       video_name = res.group(1)
     except:
       log("bot", f"{who(message)}, not a YouTube link: {message.text[:200]!r}")
-      bot.send_message(message.chat.id, 'дай мне ссылку на видос на ютубе, или кинь файл <20МБ')
+      bot.send_message(message.chat.id, f'дай мне ссылку на видос на ютубе, или кинь файл <{max_fetch_mb:g}МБ')
       return
 
     url = "https://www.youtube.com/watch?v=" + video_name
     log(video_name, f"{who(message)} asks for {message.text[:200]}")
     bot.send_message(message.chat.id, 'пробуем скачать, video id=' + video_name)
-    start_request(video_name, download_video, message.chat.id, message.text, video_name)
+    start_request(video_name, download_video, message.chat.id, url, video_name, kind_named(message.text))
 
   else:
     log("bot", f"{who(message)}, not on the list: {message.text[:200]!r}")
@@ -309,8 +344,9 @@ def process_file(message):
       bot.send_message(message.chat.id, f'Паша Дуров мудак, курит табак, и ботам нельзя принимать файлы >{max_fetch_mb:g} Мб  https://core.telegram.org/bots/api#getfile')
       return
 
-    bot.send_message(message.chat.id, 'пробуем скачать  ' + str(message.audio.title))
-    start_request(tag, compress_audio, message.chat.id, message.audio.file_id, message.audio.title, tag)
+    title = message.audio.title or message.audio.file_name or 'audio'
+    bot.send_message(message.chat.id, 'пробуем скачать  ' + title)
+    start_request(tag, take_audio, message.chat.id, message.audio.file_id, title, tag, kind_named(message.caption))
 
   else:
     log(tag, f"{who(message)}, not on the list")
