@@ -1,7 +1,9 @@
 #!/usr/bin/python3
 
 import telebot
+from telebot import apihelper
 from telebot.types import InputFile
+import requests
 import _thread
 import subprocess
 import time
@@ -21,15 +23,41 @@ bot_key = os.environ['BOT_KEY']
 allowed_ids = [int(i) for i in re.split(r'[\s,]+', os.environ['ALLOWED_IDS'].strip())]
 compand = os.environ['COMPAND']
 
+# the Bot API server: Telegram's own, or ours when BOT_API_URL names it (a
+# --local one, which fetches and sends files of up to 2000 MB; Telegram's
+# own fetches 20 MB and sends 50). A bot is logged in on one server only.
+bot_api_url = os.environ.get('BOT_API_URL', '').rstrip('/')
+if bot_api_url:
+  apihelper.API_URL = bot_api_url + '/bot{0}/{1}'
+  apihelper.FILE_URL = bot_api_url + '/file/bot{0}/{1}'
+  # getFile answers once the server has the whole file from Telegram
+  apihelper.READ_TIMEOUT = 600
+  max_fetch_mb, max_send_mb = 2000, 2000
+else:
+  max_fetch_mb, max_send_mb = 19.9, 50
+
 bot = telebot.TeleBot(bot_key)
 
 
 # a line to the log, which is the container's: the time in UTC, then the
-# request it is about - a video id, or "audio" and the message's id
+# request it is about - a video id, or "audio" and the message's id. The
+# bot's token, which a file's address and an error about it carry, is cut out.
 def log(tag, msg):
   stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-  sys.stdout.write(''.join(f"{stamp} [{tag}] {line}\n" for line in str(msg).splitlines() or ['']))
+  lines = str(msg).replace(bot_key, '<token>').splitlines() or ['']
+  sys.stdout.write(''.join(f"{stamp} [{tag}] {line}\n" for line in lines))
   sys.stdout.flush()
+
+
+# a file the bot was sent, fetched into path piece by piece: a big one would
+# not fit in the container's memory, as telebot's download_file would hold it
+def fetch_file(file_path, path):
+  url = (apihelper.FILE_URL or "https://api.telegram.org/file/bot{0}/{1}").format(bot_key, file_path)
+  with requests.get(url, stream=True, timeout=(15, 600)) as r:
+    r.raise_for_status()
+    with open(path, 'wb') as f:
+      for chunk in r.iter_content(1 << 20):
+        f.write(chunk)
 
 
 # who sent a message, for the log
@@ -211,18 +239,16 @@ def download_video(chat_id, url, tag):
 
 
 
-def compress_audio(chat_id, file_id_info, audio_title, tag):
+def compress_audio(chat_id, file_id, audio_title, tag):
   fname_tmp = str(time.time()) + ".mp3"
   fname_final = "out" + str(time.time()) + ".ogg"
 
   bot.send_message(chat_id, "забираю файл...")
 
-  file_contents = bot.download_file(file_id_info.file_path)
   try:
-    with open(fname_tmp, 'wb') as fd:
-      fd.write(file_contents)
-      fd.close()
-  except:
+    fetch_file(bot.get_file(file_id).file_path, fname_tmp)
+  except Exception as e:
+    log(tag, f"fetching the file failed: {e}")
     bot.send_message(chat_id, "случилась какая-то херня, и я не смог сохранить файл...")
     return None
   log(tag, f"received {fname_tmp}, {size_mb(fname_tmp)}")
@@ -278,14 +304,13 @@ def process_file(message):
   tag = f"audio {message.message_id}"
   if message.from_user.id in allowed_ids:
     log(tag, f"{who(message)} sends {message.audio.title!r}, {message.audio.file_size / 1048576:.1f} MB")
-    if message.audio.file_size/1024/1024 > 19.9:
-      log(tag, "over 19.9 MB, more than a bot may fetch")
-      bot.send_message(message.chat.id, 'Паша Дуров мудак, курит табак, и ботам нельзя принимать файлы >20 Мб  https://core.telegram.org/bots/api#getfile')
+    if message.audio.file_size/1024/1024 > max_fetch_mb:
+      log(tag, f"over {max_fetch_mb} MB, more than a bot may fetch")
+      bot.send_message(message.chat.id, f'Паша Дуров мудак, курит табак, и ботам нельзя принимать файлы >{max_fetch_mb:g} Мб  https://core.telegram.org/bots/api#getfile')
       return
 
-    file_id_info = bot.get_file(message.audio.file_id)
     bot.send_message(message.chat.id, 'пробуем скачать  ' + str(message.audio.title))
-    start_request(tag, compress_audio, message.chat.id, file_id_info, message.audio.title, tag)
+    start_request(tag, compress_audio, message.chat.id, message.audio.file_id, message.audio.title, tag)
 
   else:
     log(tag, f"{who(message)}, not on the list")
@@ -299,6 +324,7 @@ def process_location(message):
 
 
 #bot.polling()
+log("bot", "Bot API: " + (bot_api_url or "https://api.telegram.org, Telegram's own"))
 log("bot", "yt-dlp " + subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True).stdout.strip())
 log("bot", "cookies.txt: " + ("logged in to YouTube" if has_login() else "no YouTube login in it" if os.path.exists("cookies.txt") else "none"))
 print(f"polling as @{bot.get_me().username}", flush=True)
